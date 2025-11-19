@@ -2,7 +2,7 @@ bl_info = {
     "name": "Explodium",
     "description": "Shows an exploded view of your mesh",
     "author": "Shawn Shipley",
-    "version": (1, 0, 3),
+    "version": (1, 0, 5),
     "blender": (4, 2, 0),
     "category": "3D View",
     "doc_url": "https://github.com/shawnshipley/explodium",

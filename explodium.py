@@ -1,26 +1,30 @@
 bl_info = {
     "name": "Explodium",
     "author": "Shawn Shipley",
-    "version": (1, 1, 1),
-    "blender": (4, 0, 0),
+    "version": (1, 0, 5),
+    "blender": (4, 2, 0),
     "location": "View3D > Edit Mode > N-Panel > Edit Tab",
-    "description": "Preview exploded mesh with user-editable amount and reset button",
+    "description": "Shows an exploded view of your mesh",
     "category": "Mesh",
 }
 
 import bpy
 import rna_keymap_ui
 
-# ---------------------------------------------
-# Global keymap storage
-# ---------------------------------------------
+# =============================================================
+# GLOBALS
+# =============================================================
+
 addon_keymaps = []
 
 
-# ---------------------------------------------
-# Scene Properties (user-editable scale values)
-# ---------------------------------------------
+# =============================================================
+# SCENE PROPERTIES
+# =============================================================
+
 class ExplodiumProperties(bpy.types.PropertyGroup):
+    """Custom scene properties for Explodium"""
+
     shrink_factor: bpy.props.FloatProperty(
         name="Shrink Faces",
         description="Shrink each face individually",
@@ -33,22 +37,23 @@ class ExplodiumProperties(bpy.types.PropertyGroup):
         name="Expand Mesh",
         description="Overall expansion of exploded mesh",
         default=1.5,
-        min=0.0,
-        max=5.0,
+        min=1.0,
+        max=10.0,
     )
 
 
-# ---------------------------------------------
-# Operator
-# ---------------------------------------------
+# =============================================================
+# OPERATOR: Explode Mesh Preview
+# =============================================================
+
 class MESH_OT_explodium(bpy.types.Operator):
-    """Preview exploded mesh (hold hotkey)"""
+    """Preview exploded mesh while holding hotkey"""
     bl_idname = "mesh.explodium"
-    bl_label = "Explode Preview"
+    bl_label = "Exploded Preview"
     bl_options = {'REGISTER', 'UNDO'}
 
     _timer = None
-    original_mesh_data = None
+    _original_mesh_data = None
 
     def modal(self, context, event):
         kmi = get_keymap_item()
@@ -59,13 +64,31 @@ class MESH_OT_explodium(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.explodium_props
-        shrink = props.shrink_factor
-        expand = props.expand_factor
-
         obj = context.active_object
-        bpy.ops.object.mode_set(mode='OBJECT')
-        self.original_mesh_data = obj.data.copy()
-        bpy.ops.object.mode_set(mode='EDIT')
+
+        if not obj or obj.type != 'MESH':
+            self.report({'WARNING'}, "Active object must be a mesh")
+            return {'CANCELLED'}
+
+        if obj.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except RuntimeError:
+                self.report({'WARNING'}, "Cannot switch object mode")
+                return {'CANCELLED'}
+
+        # Copy original mesh for restoration
+        self._original_mesh_data = obj.data.copy()
+
+        try:
+            bpy.ops.object.mode_set(mode='EDIT')
+        except RuntimeError:
+            # Clean up if mode switch fails
+            if self._original_mesh_data:
+                bpy.data.meshes.remove(self._original_mesh_data)
+                self._original_mesh_data = None
+            self.report({'WARNING'}, "Cannot switch to edit mode")
+            return {'CANCELLED'}
 
         bpy.ops.mesh.select_mode(type='EDGE')
         bpy.ops.mesh.select_all(action='SELECT')
@@ -75,61 +98,105 @@ class MESH_OT_explodium(bpy.types.Operator):
 
         # Step 1: Shrink each face
         context.scene.tool_settings.transform_pivot_point = 'INDIVIDUAL_ORIGINS'
-        bpy.ops.transform.resize(value=(shrink, shrink, shrink), orient_type='LOCAL')
+        s = props.shrink_factor
+        bpy.ops.transform.resize(value=(s, s, s), orient_type='LOCAL')
 
         # Step 2: Expand the entire mesh
         context.scene.tool_settings.transform_pivot_point = 'MEDIAN_POINT'
-        bpy.ops.transform.resize(value=(expand, expand, expand))
+        e = props.expand_factor
+        bpy.ops.transform.resize(value=(e, e, e))
 
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.1, window=context.window)
-        wm.modal_handler_add(self)
+        
+        try:
+            wm.modal_handler_add(self)
+        except:
+            wm.event_timer_remove(self._timer)
+            self._timer = None
+            self.cancel(context)
+            return {'CANCELLED'}
+
         return {'RUNNING_MODAL'}
 
     def cancel(self, context):
-        obj = context.active_object
-        bpy.ops.object.mode_set(mode='OBJECT')
-        old_mesh = obj.data
-        obj.data = self.original_mesh_data
-        bpy.data.meshes.remove(old_mesh)
-        bpy.ops.object.mode_set(mode='EDIT')
-
         wm = context.window_manager
-        wm.event_timer_remove(self._timer)
+        if self._timer:
+            wm.event_timer_remove(self._timer)
+            self._timer = None
+        
+        obj = context.active_object
+        if not obj or not self._original_mesh_data:
+            return
+
+        if obj.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except RuntimeError:
+                pass
+
+        old_mesh = obj.data
+        obj.data = self._original_mesh_data
+        bpy.data.meshes.remove(old_mesh)
+        self._original_mesh_data = None
+
+        try:
+            bpy.ops.object.mode_set(mode='EDIT')
+        except RuntimeError:
+            pass
+
+    def __del__(self):
+        if self._original_mesh_data and self._original_mesh_data.users == 0:
+            bpy.data.meshes.remove(self._original_mesh_data)
 
 
-# ---------------------------------------------
-# Helper Functions
-# ---------------------------------------------
+# =============================================================
+# HELPERS
+# =============================================================
+
 def get_keymap_item():
+    """Find the registered keymap item for Explodium"""
     wm = bpy.context.window_manager
-    kc = wm.keyconfigs.user
+    kc = getattr(wm.keyconfigs, "user", None)
+    if not kc:
+        return None
+
     km = kc.keymaps.get('Mesh')
-    if km:
-        for kmi in km.keymap_items:
-            if kmi.idname == "mesh.explodium":
-                return kmi
+    if not km:
+        return None
+
+    for kmi in km.keymap_items:
+        if kmi.idname == "mesh.explodium":
+            return kmi
     return None
 
 
 def get_hotkey_string():
+    """Return a formatted string representing the active hotkey"""
     kmi = get_keymap_item()
     if not kmi:
         return "Not Set"
+
     parts = []
-    if kmi.ctrl: parts.append("Ctrl")
-    if kmi.shift: parts.append("Shift")
-    if kmi.alt: parts.append("Alt")
+    if kmi.ctrl:
+        parts.append("Ctrl")
+    if kmi.shift:
+        parts.append("Shift")
+    if kmi.alt:
+        parts.append("Alt")
     if kmi.oskey:
         parts.append("Cmd" if bpy.app.build_platform == 'DARWIN' else "Win")
     parts.append(kmi.type)
+
     return "+".join(parts)
 
 
-# ---------------------------------------------
-# Add-on Preferences
-# ---------------------------------------------
+# =============================================================
+# ADD-ON PREFERENCES
+# =============================================================
+
 class ExplodiumPreferences(bpy.types.AddonPreferences):
+    """Preferences panel for keymap customization"""
     bl_idname = __package__
 
     def draw(self, context):
@@ -144,35 +211,45 @@ class ExplodiumPreferences(bpy.types.AddonPreferences):
 
         for km, kmi in addon_keymaps:
             km_user = kc.keymaps.get(km.name)
-            if km_user:
-                for kmi_user in km_user.keymap_items:
-                    if kmi_user.idname == "mesh.explodium":
-                        rna_keymap_ui.draw_kmi(
-                            ["ADDON", "USER", "DEFAULT"],
-                            kc, km_user, kmi_user, col, 0
-                        )
-                        break
+            if not km_user:
+                continue
+            for kmi_user in km_user.keymap_items:
+                if kmi_user.idname == "mesh.explodium":
+                    rna_keymap_ui.draw_kmi(
+                        ["ADDON", "USER", "DEFAULT"],
+                        kc, km_user, kmi_user, col, 0
+                    )
+                    break
+            else:
+                continue
+            break
 
 
-# ---------------------------------------------
-# Restore Defaults Operator
-# ---------------------------------------------
+# =============================================================
+# OPERATOR: Restore Defaults
+# =============================================================
+
 class EXPLODIUM_OT_restore_defaults(bpy.types.Operator):
-    """Restore default shrink/expand values"""
+    """Restore default shrink and expand values"""
     bl_idname = "explodium.restore_defaults"
-    bl_label = "Restore Default Values"
+    bl_label = "Restore Defaults"
 
     def execute(self, context):
         props = context.scene.explodium_props
         props.shrink_factor = 0.7
         props.expand_factor = 1.5
         self.report({'INFO'}, "Explodium values restored to defaults")
+
+        if context.area:
+            context.area.tag_redraw()
+
         return {'FINISHED'}
 
 
-# ---------------------------------------------
-# N-Panel
-# ---------------------------------------------
+# =============================================================
+# UI PANEL
+# =============================================================
+
 class VIEW3D_PT_explodium(bpy.types.Panel):
     """Explodium panel in the N-Panel Edit tab"""
     bl_label = "Explodium"
@@ -186,7 +263,7 @@ class VIEW3D_PT_explodium(bpy.types.Panel):
         layout = self.layout
         props = context.scene.explodium_props
 
-        layout.label(text="Explode Preview:")
+        layout.label(text="Exploded Preview:")
         layout.label(text=f"Hold {get_hotkey_string()}", icon='INFO')
 
         layout.separator()
@@ -196,27 +273,38 @@ class VIEW3D_PT_explodium(bpy.types.Panel):
         layout.operator("explodium.restore_defaults", icon="FILE_REFRESH")
 
 
-# ---------------------------------------------
-# Keymap Registration
-# ---------------------------------------------
+# =============================================================
+# KEYMAP REGISTRATION
+# =============================================================
+
 def register_keymaps():
-    wm = bpy.context.window_manager
-    kc = wm.keyconfigs.addon
-    if kc:
-        km = kc.keymaps.new(name='Mesh', space_type='EMPTY')
-        kmi = km.keymap_items.new("mesh.explodium", 'P', 'PRESS', ctrl=True, shift=True)
-        addon_keymaps.append((km, kmi))
+    """Register hotkeys for Explodium"""
+    try:
+        wm = bpy.context.window_manager
+        kc = wm.keyconfigs.addon
+
+        if kc:
+            km = kc.keymaps.new(name='Mesh', space_type='EMPTY')
+            kmi = km.keymap_items.new("mesh.explodium", 'P', 'PRESS', ctrl=True, shift=True)
+            addon_keymaps.append((km, kmi))
+    except:
+        pass
 
 
 def unregister_keymaps():
+    """Unregister addon keymaps"""
     for km, kmi in addon_keymaps:
-        km.keymap_items.remove(kmi)
+        try:
+            km.keymap_items.remove(kmi)
+        except:
+            pass
     addon_keymaps.clear()
 
 
-# ---------------------------------------------
-# Registration
-# ---------------------------------------------
+# =============================================================
+# REGISTRATION
+# =============================================================
+
 classes = (
     ExplodiumProperties,
     MESH_OT_explodium,
@@ -229,6 +317,7 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+
     bpy.types.Scene.explodium_props = bpy.props.PointerProperty(type=ExplodiumProperties)
     register_keymaps()
 
