@@ -73,11 +73,30 @@ class MESH_OT_explodium(bpy.types.Operator):
         wm = context.window_manager
         wm.event_timer_remove(self._timer)
 
+
+# N-Panel UI
+class VIEW3D_PT_explodium(bpy.types.Panel):
+    """Explodium panel in the N-Panel Edit tab"""
+    bl_label = "Explodium"
+    bl_idname = "VIEW3D_PT_explodium"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Edit'
+    bl_context = "mesh_edit"
+    
+    def draw(self, context):
+        layout = self.layout
+        
+        layout.label(text="Explode Preview:")
+        layout.label(text="Hold Ctrl+Shift+P", icon='INFO')
+
+
 # Keymap
 addon_keymaps = []
 
 def register():
     bpy.utils.register_class(MESH_OT_explodium)
+    bpy.utils.register_class(VIEW3D_PT_explodium)
     
     # Add keymap
     wm = bpy.context.window_manager
@@ -93,6 +112,7 @@ def unregister():
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
     
+    bpy.utils.unregister_class(VIEW3D_PT_explodium)
     bpy.utils.unregister_class(MESH_OT_explodium)
 
 if __name__ == "__main__":
